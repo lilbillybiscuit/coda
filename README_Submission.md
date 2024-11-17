@@ -4,6 +4,16 @@ I used ChatGPT to plan out the steps for the lab, and then I mostly wrote the co
 
 Approximately ~50% (400 lines) of the code is written using ChatGPT. I generated a lot of the docker code (with a lot of special prompting to fit my environment), and some of the prompt manager code. I wrote the rest of the code, or used ChatGPT to refactor the starter code.
 
+## To run the program
+First build the docker image:
+```
+docker build -t coda .
+```
+Then run the program:
+```
+python main.py
+```
+
 ## Part 1
 When I set out to do this assignment, in addition to the requirements, I also kept a focus on security, reliability, and reproducibility. I worked towards these goals because this is what I believe that an AI programmer should be, it should be explainable, reproducible, and if something goes wrong, then it should be easy to fix.
 
