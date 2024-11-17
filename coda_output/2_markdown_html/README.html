@@ -1,0 +1,68 @@
+<h1>(CPSC 429/529) CODA - Autonomous Coding Assistant</h1>
+<p>This repository offers an example for building <strong>CODA</strong>, an agentic system that autonomously generates, modifies, and executes code based on user-defined tasks. This example provides a starting point, but we highly encourage you to explore your own design and prompt while adhering to the assignment specifications.</p>
+<h2>Project Overview</h2>
+<p>CODA transforms passive interactions with AI into active collaboration by enabling autonomous control within your development environment. Core features include:</p>
+<ul>
+<li><strong>Input Handling</strong>: Accepts a task description and a working directory path.</li>
+<li><strong>Function Calling</strong>: Uses OpenAI's API to generate shell scripts that perform the desired tasks.</li>
+<li><strong>Execution</strong>: Runs the generated shell scripts and collects execution logs.</li>
+<li><strong>Feedback Loop</strong>: Analyzes the execution logs to determine success and handles errors accordingly.</li>
+</ul>
+<h2>Prerequisites</h2>
+<p>Ensure the following are installed:</p>
+<ul>
+<li><strong>Python</strong> (Version 3.10 or higher)</li>
+<li><strong>OpenAI Python SDK</strong> (<code>openai</code> package)</li>
+<li><strong>OpenAI API Key</strong></li>
+</ul>
+<h2>Installation Guide</h2>
+<ol>
+<li>
+<p><strong>Clone the Repository</strong>
+   <code>bash
+   git clone https://github.com/ingim/coda.git</code></p>
+</li>
+<li>
+<p><strong>Change to the CODA Directory</strong>
+   <code>bash
+   cd coda</code></p>
+</li>
+<li>
+<p><strong>Install Required Packages</strong>
+   <code>bash
+   pip install openai</code></p>
+</li>
+<li>
+<p><strong>Configure the OpenAI API Key</strong></p>
+</li>
+<li>Edit <code>coda.py</code> to include your API key, replacing <code>'api_key'</code> with your actual key.</li>
+<li>Alternatively, set it as an environment variable:
+     <code>bash
+     export OPENAI_API_KEY='your-api-key'</code></li>
+</ol>
+<h2>Using CODA</h2>
+<ol>
+<li>
+<p><strong>Run CODA</strong>:
+   <code>bash
+   python main.py</code></p>
+</li>
+<li>
+<p><strong>Define Your Task</strong>:</p>
+</li>
+<li>Enter a brief description of the code or function you want CODA to create.</li>
+<li>
+<p>Specify the working directory where generated files should be saved.</p>
+</li>
+<li>
+<p><strong>Generated Scripts and Execution Logs</strong>:</p>
+</li>
+<li>
+<p>CODA will display the shell script it generates, followed by real-time logs for each execution.</p>
+</li>
+<li>
+<p><strong>Feedback Loop</strong>:</p>
+</li>
+<li>Upon successful completion, you can define additional tasks or exit.</li>
+<li>For errors, CODA analyzes the issue and revises the task description as needed.</li>
+</ol>
