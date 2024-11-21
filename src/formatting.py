@@ -24,7 +24,9 @@ class Color:
         if italic:
             formatting += "\033[3m"
 
-        return print(f"{formatting}{color_mapping[color]}{text}{color_mapping['reset']}", flush=True, **kwargs)
+        if 'flush' not in kwargs:
+            kwargs['flush'] = True
+        return print(f"{formatting}{color_mapping[color]}{text}{color_mapping['reset']}", **kwargs)
 
     # same method as above, but for input. use the above method for output
     @staticmethod

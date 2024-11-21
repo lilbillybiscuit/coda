@@ -1,3 +1,5 @@
+import time
+
 import docker
 from docker.models.containers import Container
 from pathlib import Path
@@ -41,6 +43,7 @@ class DockerConfig:
         }
 
         if config_file and os.path.exists(config_file):
+            print("Using config file")
             with open(config_file) as f:
                 self.config.update(yaml.safe_load(f))
 
@@ -50,28 +53,23 @@ class DockerEnvironment:
         self.config: DockerConfig = config or DockerConfig()
         self.client: docker.DockerClient = docker.from_env()
         self.container: Optional[Container] = None
-        self.volumes: VolumeConfig = {}
 
         # Set up volume directories with proper structure
         base_path: Path = Path("./docker_data").absolute()
         base_path.mkdir(parents=True, exist_ok=True)
 
-        # Initialize volumes with proper structure
+        # Initialize container_volumes
+        self.container_volumes = {}
         for name, mount_point in self.config.config["volumes"].items():
-            volume_path: Path = base_path / name
+            volume_path = base_path / name
             volume_path.mkdir(parents=True, exist_ok=True)
+            # Ensure host directory has proper permissions
+            os.chmod(volume_path, 0o777)
 
-            self.volumes[name] = {
-                "host_path": str(volume_path),
-                "bind": mount_point,
-                "mode": "rw"
+            self.container_volumes[str(volume_path)] = {
+                'bind': mount_point,
+                'mode': 'rw'
             }
-
-        # Create container mount configuration
-        self.container_volumes: Dict[str, Dict[str, str]] = {
-            vol_info["host_path"]: {"bind": vol_info["bind"], "mode": vol_info["mode"]}
-            for vol_info in self.volumes.values()
-        }
 
         self._ensure_container()
 
@@ -152,10 +150,11 @@ class DockerEnvironment:
                 environment=self.config.config["environment"],
                 working_dir=self.config.config["working_dir"],
                 network=self.config.config["network"],
-                detach=True,  # Always run in detached mode
-                auto_remove=False,  # Don't auto-remove to prevent disappearing containers
-                tty=True,  # Allocate a pseudo-TTY
-                stdin_open=True  # Keep STDIN open
+                detach=True,
+                auto_remove=False,
+                tty=True,
+                stdin_open=True,
+                user="0"  # Run as root
             )
 
             # Wait for container to be ready
@@ -164,11 +163,15 @@ class DockerEnvironment:
                 time.sleep(0.1)
                 container.reload()
 
+            # Ensure workspace has correct permissions
+            container.exec_run("chmod -R 777 /workspace")
+
             return container
 
         except APIError as e:
             logger.error(f"Failed to create container: {e}")
             raise
+
 
     def execute(self,
                 command: str,

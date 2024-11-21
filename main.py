@@ -1,24 +1,30 @@
+import logging
 import os
 from openai import OpenAI
 from src.docker_env import DockerEnvironment, DockerConfig
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import datetime
 from src.prompt_manager import PromptManager
 from src.formatting import Color
+from src.json_executor import JsonExecutor
+import json
+from src.commands.base import CommandError, CommandRegistry
 import threading
 import time
-# Set up your OpenAI API key
+from src.commands.execute_commands import prompt_for_permission
+
 client = OpenAI()
 
-# i = user interaction
-# c = computer generation
-# e = computer execution
+logging.basicConfig(level=logging.WARN)
+
+
 class CODA:
-    def __init__(self, docker_config: DockerConfig, prompt_manager: PromptManager):
+    def __init__(self, docker_config: DockerConfig, prompt_manager: PromptManager, json_executor: JsonExecutor):
         self.docker_config = docker_config
         self.prompt_manager = prompt_manager
+        self.json_executor = json_executor
 
-    def call_openai_api(self, callback: Optional[callable]=None):
+    def call_openai_api(self, callback: Optional[callable] = None):
         messages = self.prompt_manager.get_messages()
 
         full_response = ""
@@ -37,124 +43,131 @@ class CODA:
                     callback(content)
 
         self.prompt_manager.add_message("assistant", full_response)
-
         return full_response
 
     def i_get_user_input(self):
-        """
-        Function to get the task description and working directory from the user.
-        """
+        """Get task description and working directory from user."""
         task_description = Color.colorize_input("white", bold=True, text="Enter the task description: ").strip()
-        working_directory = Color.colorize_input("white", bold=True, text="Enter the path to the working directory: ").strip()
-
-        # Convert to absolute path if relative
-        # working_directory = os.path.abspath(working_directory)
+        working_directory = Color.colorize_input("white", bold=True,
+                                                 text="Enter the path to the working directory: ").strip()
 
         if working_directory == "":
             working_directory = "/workspace"
         return task_description, working_directory
 
-    def c_generate_shell_script(self, task_description, working_directory, docker_env, callback: Optional[callable] = None):
-        stdout, stderr = docker_env.execute(f"ls -la {working_directory}")
-        directory_listing = stdout if stdout else "The directory is empty."
-
-        # Set task-specific system message
+    def c_generate_commands(self, task_description: str, working_directory: str, callback: Optional[callable] = None):
+        """Generate commands based on task description."""
         self.prompt_manager.set_system_message(
-            "You are an AI assistant that generates shell scripts that run on a fresh Ubuntu 22.04 environment."
-            "Provide only the script code WITHOUT any markdown formatting or explanations. This means no backticks."
-            "Ensure the script is compatible with bash and handles errors appropriately. "
-            "Scripts that you have written before have already been executed in the environment (although they may not have run to completion, as according to the output)."
+            "You are an AI assistant that generates commands to accomplish tasks in a Linux environment. "
+            "Return a JSON array of command objects. Available commands: create, append, execute, delete, complete. "
+            "Use the 'complete' command when you determine the task is finished. Do NOT write complete until you have seen 'PROGRAM RESULT' in the chat history."
+            "Each command should include a 'summary' field that briefly describes what the command does. "
+            "Each command should be atomic and focused. Format the response as a valid JSON array without explanations or markdown. For execute commands, you can assume that you are running these commands in a shell -- no need to write bash as the main command"
+            f"Available commands and their schemas:\n{json.dumps(self.json_executor.get_command_docs(), indent=2)}"
+            "Return only a JSON array of commands. Each command should include a 'summary' field."
         )
 
         prompt = f"""
-        Generate a shell script for the following task:
+        Generate commands for the following task:
         {task_description}
 
         Working directory: {working_directory}
-        Directory contents:
-        {directory_listing}
         """
+
         self.prompt_manager.add_message("user", prompt)
-        shell_script = self.call_openai_api(callback=callback)
-        return shell_script
+        response = self.call_openai_api(callback=callback)
 
-    def e_save_shell_script(self, shell_script, docker_env, script_path):
-        """
-        Function to save the generated shell script to the container and make it executable.
-        """
-        # Copy script content to container
-        docker_env.copy_to_container(shell_script, script_path)
-        # Make script executable
-        docker_env.execute(f"chmod +x {script_path}")
+        if "```" in response[:7]:
+            response_split = response.split("\n")[1:-1]
+            response = "\n".join(response_split)
 
-    def e_execute_shell_script(self, script_path, working_directory, docker_env):
-        """
-        Function to execute the shell script in the container and collect logs.
-        """
 
-        def spinner():
-            while True:
-                for frame in ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]:
-                    print(f"\r{frame} Running script...", end='', flush=True)
-                    yield
-
-        def spin():
-            while not done:
-                next(spinner)
-                time.sleep(0.1)
-
-        done = False
-        spinner = spinner()
-        spin_thread = threading.Thread(target=spin)
-        spin_thread.start()
         try:
-            stdout, stderr = docker_env.execute(
-                f"bash {script_path}",
-                workdir=working_directory
-            )
-        finally:
-            done = True
-            spin_thread.join()
-            print("\r", end='', flush=True)
-        return stdout, stderr
+            commands = json.loads(response)
+            if not isinstance(commands, list):
+                commands = [commands]
+            return commands
+        except json.JSONDecodeError:
+            raise ValueError("Failed to parse commands as JSON")
 
-    def c_analyze_logs(self, stdout: str, stderr: str, task_description: str, callback: Optional[callable] = None) -> str:
-        self.prompt_manager.set_system_message(
-            "You are an AI assistant that analyzes script execution logs. "
-            "Provide only the revised task description without explanations."
-        )
+    def print_command_summary(self, commands: List[Dict[str, Any]]):
+        """Print a summary of commands to be executed."""
+        Color.colorize("yellow", bold=True, text="\nCommands to execute:")
+        for i, cmd in enumerate(commands, 1):
+            action = cmd.get('action', 'unknown')
+            summary = cmd.get('summary', 'No description provided')
 
-        prompt = f"""
-        Analyze these execution logs for the task:
-        {task_description}
+            # Get command color from registry
+            command_class = CommandRegistry.get_command(action)
+            color = getattr(command_class, 'color', 'white') if command_class else 'white'
 
-        STDOUT:
-        {stdout}
+            Color.colorize(color, bold=True, text=f"\n{i}. [{action.upper()}]")
+            print(f" {summary}")
 
-        STDERR:
-        {stderr}
 
-        Provide a revised task description that would lead to successful execution.
-        """
+    def e_execute_commands(self, commands: List[Dict[str, Any]], working_directory: str) -> Tuple[
+        List[Dict[str, Any]], Optional[str], bool]:
+        """Execute the generated commands. Returns (results, error, is_complete)"""
+        results = []
+        is_complete = False
 
-        self.prompt_manager.add_message("user", prompt)
-        analysis = self.call_openai_api(callback=callback)
+        for i, command in enumerate(commands, 1):
+            try:
+                action = command.get('action', 'unknown')
+                summary = command.get('summary', 'No description provided')
 
-        # Remove the analysis exchange but keep execution logs
-        self.prompt_manager.pop_message()
-        self.prompt_manager.pop_message()
+                # Get command color from registry
+                command_class = CommandRegistry.get_command(action)
+                color = getattr(command_class, 'color', 'white') if command_class else 'white'
 
-        # Add execution logs as a user message
-        self.prompt_manager.add_message("user",
-        f"""Results of last execution:
-        STDOUT:
-        {stdout}
-        
-        STDERR:
-        {stderr}
-        """)
+                Color.colorize(color, bold=True,
+                               text=f"\n→ {i}/{len(commands)} [{action.upper()}] {summary}")
 
-        return analysis
+                # Show spinner for execute commands
+                result = self.json_executor.execute(command)
+
+                results.extend(result)
+
+                # Print immediate result feedback
+                for r in result:
+                    if r.get("status") == "completed":
+                        Color.colorize("green", bold=True, text=f"✓ {r['message']}")
+                    elif "stdout" in r and r["stdout"].strip():
+                        print("\nOutput:")
+                        print(r["stdout"].strip())
+                    elif r.get("status"):
+                        Color.colorize(color, bold=False, text=f"→ {r['status']}: {r.get('path', '')}")
+
+                    # Check for errors in the result
+                    if r.get("stderr") and r["stderr"].strip():
+                        error_msg = r["stderr"].strip()
+                        Color.colorize("red", bold=True, text=f"\n✗ Command failed:")
+                        Color.colorize("red", bold=False, text=error_msg)
+                        return results, error_msg, False
+
+                if action == "complete":
+                    is_complete = True
+                    break
+
+            except CommandError as e:
+                error_msg = str(e)
+                Color.colorize("red", bold=True, text=f"\n✗ Command failed:")
+                Color.colorize("red", bold=False, text=error_msg)
+
+                # Show which command failed in the sequence
+                remaining = len(commands) - i
+                if remaining > 0:
+                    Color.colorize("yellow", bold=True,
+                                   text=f"\nSkipping {remaining} remaining command{'s' if remaining > 1 else ''}")
+
+                return results, error_msg, False
+            except Exception as e:
+                error_msg = f"Unexpected error: {str(e)}"
+                Color.colorize("red", bold=True, text=f"\n✗ Command failed:")
+                Color.colorize("red", bold=False, text=error_msg)
+                return results, error_msg, False
+
+        return results, None, is_complete
 
 def main():
     docker_config = DockerConfig()
@@ -162,9 +175,10 @@ def main():
 
     Color.colorize(color="green", bold=True, text="Welcome to CODA!")
 
-    coda = CODA(docker_config, prompt_manager)
-
     with DockerEnvironment(docker_config) as docker_env:
+        json_executor = JsonExecutor(working_dir="/workspace", docker_env=docker_env)
+        coda = CODA(docker_config, prompt_manager, json_executor)
+
         task_description, working_directory = coda.i_get_user_input()
         docker_env.execute(f"mkdir -p {working_directory}")
 
@@ -172,35 +186,43 @@ def main():
         Color.colorize("green", bold=False, text=task_description)
 
         while True:
-            # generate script
-            Color.colorize("yellow", bold=True, text="Generating Shell Script:")
+            # Generate commands
+            Color.colorize("yellow", bold=True, text="\nGenerating Commands:")
             Color.start_color("grey")
-            shell_script = coda.c_generate_shell_script(task_description, working_directory, docker_env, lambda x: print(x, end='', flush=True))
+            commands = coda.c_generate_commands(task_description, working_directory, lambda x: print(x, end='', flush=True))
             Color.end_color()
 
-            # save script and execute
-            script_path = os.path.join(working_directory, 'coda_script.sh')
-            coda.e_save_shell_script(shell_script, docker_env, script_path)
+            # Print command summary
+            # coda.print_command_summary(commands)
 
-            stdout, stderr = coda.e_execute_shell_script(script_path, working_directory, docker_env)
-            print()
-            Color.colorize("yellow", bold=True, text="Execution Logs:")
-            print("STDOUT:")
-            print(stdout)
+            # # Confirm execution
+            # if Color.colorize_input("white", bold=True, text="\nProceed with execution? (y/n): ").lower() != 'y':
+            #     Color.colorize("yellow", bold=True, text="Execution cancelled.")
+            #     if Color.colorize_input("white", bold=True, text="Generate new commands? (y/n): ").lower() != 'y':
+            #         break
+            #     continue
 
-            # if error
-            if len(stderr.strip()) > 0:
-                print("STDERR:")
-                print(stderr)
+            # Execute commands
+            Color.colorize("yellow", bold=True, text="\nExecuting Commands:")
+            results, error, is_complete = coda.e_execute_commands(commands, working_directory)
 
-                Color.colorize("yellow", bold=True, text="Revised Description:")
-                task_description = coda.c_analyze_logs(stdout, stderr, task_description, lambda x: print(x, end='', flush=True))
-                print()
-            else:
-                Color.colorize("green", bold=True, text="Task completed successfully.\n")
-                follow_up = Color.colorize_input("white", bold=True, text="Enter a follow-up task description (or press Enter to exit):").strip()
+            # save results to chat history
+            result_prompt = f"\nPROGRAM RESULTS:\n{json.dumps(results, indent=2)}"
+            prompt_manager.add_message("user", result_prompt)
+
+            if error:
+                Color.colorize("red", bold=True, text=f"\nExecution stopped due to error")
+                keep_context = Color.colorize_input("white", bold=True,
+                                                    text="Keep context for retry? (y/n): ").lower() == 'y'
+                if not keep_context:
+                    prompt_manager.clear_history()
+                continue
+
+            if is_complete:
+                Color.colorize("green", bold=True, text="\nTask completed successfully!")
+                follow_up = Color.colorize_input("white", bold=True, text="Enter a follow-up task description (or press Enter to exit): ").strip()
                 if not follow_up:
-                    save_chat = Color.colorize_input("white", bold=True, text="Save chat history? (y/n):").lower()=='y'
+                    save_chat = Color.colorize_input("white", bold=True, text="Save chat history? (y/n): ").lower()=='y'
                     if save_chat:
                         prompt_manager.save_history("coda_data/chat_history.json")
                         print("\nChat history saved.")
@@ -208,13 +230,10 @@ def main():
                     break
                 else:
                     task_description = follow_up
+                    keep_context = Color.colorize_input("white", bold=True, text="Keep context for next task? (y/n): ").lower()=='y'
+                    if not keep_context:
+                        prompt_manager.clear_history()
                     print()
-
-
-            keep_context = Color.colorize_input("white", bold=True, text="Keep context for next iteration? (y/n):").lower()=='y'
-            if not keep_context:
-                prompt_manager.clear_history()
-
 
 if __name__ == "__main__":
     main()

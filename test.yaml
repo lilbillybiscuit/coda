@@ -1,0 +1,29 @@
+# Docker image
+image: "coda:latest"
+
+# Container name
+container_name: "coda_env"
+
+# Dockerfile location
+dockerfile_path: "./Dockerfile"
+
+# Volume mappings
+volumes:
+  workspace_test: "/workspace_test"
+  scripts: "/scripts"
+  logs: "/logs"
+  data: "/data"  # Additional volume example
+
+working_dir: "/workspace_test"
+
+# Network configuration
+network: "bridge"
+
+# Container cleanup
+auto_remove: true
+
+# Run in background
+detach: true
+
+memory: "2g"
+cpu_count: 2
