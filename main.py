@@ -12,7 +12,7 @@ from src.commands.base import CommandError, CommandRegistry
 import threading
 import time
 from src.commands.execute_commands import prompt_for_permission
-
+from src.timer import Timer
 client = OpenAI()
 
 logging.basicConfig(level=logging.WARN)
@@ -185,55 +185,47 @@ def main():
         Color.colorize("green", bold=True, text="Task Description:")
         Color.colorize("green", bold=False, text=task_description)
 
-        while True:
-            # Generate commands
-            Color.colorize("yellow", bold=True, text="\nGenerating Commands:")
-            Color.start_color("grey")
-            commands = coda.c_generate_commands(task_description, working_directory, lambda x: print(x, end='', flush=True))
-            Color.end_color()
+        with Timer("Total Session"):
+            while True:
+                with Timer("Command Generation Loop"):
+                    # Generate commands
+                    Color.colorize("yellow", bold=True, text="\nGenerating Commands:")
+                    Color.start_color("grey")
+                    commands = coda.c_generate_commands(task_description, working_directory,
+                                                        lambda x: print(x, end='', flush=True))
+                    Color.end_color()
 
-            # Print command summary
-            # coda.print_command_summary(commands)
+                with Timer("Command Execution Loop"):
+                    # Execute commands
+                    Color.colorize("blue", bold=True, text="\nExecuting Commands:")
+                    results, error, is_complete = coda.e_execute_commands(commands, working_directory)
 
-            # # Confirm execution
-            # if Color.colorize_input("white", bold=True, text="\nProceed with execution? (y/n): ").lower() != 'y':
-            #     Color.colorize("yellow", bold=True, text="Execution cancelled.")
-            #     if Color.colorize_input("white", bold=True, text="Generate new commands? (y/n): ").lower() != 'y':
-            #         break
-            #     continue
+                    # save results to chat history
+                    result_prompt = f"\nPROGRAM RESULTS:\n{json.dumps(results, indent=2)}"
+                    prompt_manager.add_message("user", result_prompt)
 
-            # Execute commands
-            Color.colorize("yellow", bold=True, text="\nExecuting Commands:")
-            results, error, is_complete = coda.e_execute_commands(commands, working_directory)
+                    if error:
+                        Color.colorize("red", bold=True, text=f"\nExecution stopped due to error")
+                        continue
 
-            # save results to chat history
-            result_prompt = f"\nPROGRAM RESULTS:\n{json.dumps(results, indent=2)}"
-            prompt_manager.add_message("user", result_prompt)
-
-            if error:
-                Color.colorize("red", bold=True, text=f"\nExecution stopped due to error")
-                keep_context = Color.colorize_input("white", bold=True,
-                                                    text="Keep context for retry? (y/n): ").lower() == 'y'
-                if not keep_context:
-                    prompt_manager.clear_history()
-                continue
-
-            if is_complete:
-                Color.colorize("green", bold=True, text="\nTask completed successfully!")
-                follow_up = Color.colorize_input("white", bold=True, text="Enter a follow-up task description (or press Enter to exit): ").strip()
-                if not follow_up:
-                    save_chat = Color.colorize_input("white", bold=True, text="Save chat history? (y/n): ").lower()=='y'
-                    if save_chat:
-                        prompt_manager.save_history("coda_data/chat_history.json")
-                        print("\nChat history saved.")
-                    print("Exiting CODA.")
-                    break
-                else:
-                    task_description = follow_up
-                    keep_context = Color.colorize_input("white", bold=True, text="Keep context for next task? (y/n): ").lower()=='y'
-                    if not keep_context:
-                        prompt_manager.clear_history()
-                    print()
-
+                    if is_complete:
+                        Color.colorize("green", bold=True, text="\nTask completed successfully!")
+                        follow_up = Color.colorize_input("white", bold=True,
+                                                         text="Enter a follow-up task description (or press Enter to exit): ").strip()
+                        if not follow_up:
+                            save_chat = Color.colorize_input("white", bold=True,
+                                                             text="Save chat history? (y/n): ").lower() == 'y'
+                            if save_chat:
+                                prompt_manager.save_history("coda_data/chat_history.json")
+                                print("\nChat history saved.")
+                            print("Exiting CODA.")
+                            break
+                        else:
+                            task_description = follow_up
+                            # keep_context = Color.colorize_input("white", bold=True,
+                            #                                     text="Keep context for next task? (y/n): ").lower() == 'y'
+                            # if not keep_context:
+                            #     prompt_manager.clear_history()
+                            # print()
 if __name__ == "__main__":
     main()
