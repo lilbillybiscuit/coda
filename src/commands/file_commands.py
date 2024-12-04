@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Callable, Optional, Type, ClassVar, Union
 from src.commands.base import Command, CommandContext, ValidationError, ExecutionError, command
-
+from pathlib import Path
+import os
 
 @command("create", color="blue",
          required=["target", "content"],
@@ -168,3 +169,133 @@ class DeleteFileCommand(Command):
         except Exception as e:
             raise ExecutionError(f"Failed to delete file: {e}")
 
+def is_binary_file(file_path: str) -> bool:
+    """Check if a file is binary by trying to read it as text."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            file.read(1024)  # Try reading the first 1024 bytes
+        return False
+    except (UnicodeDecodeError, IOError):
+        return True
+
+
+@command("read", color="cyan",
+         required=["target"],
+         properties={
+             "target": {
+                 "type": "string",
+                 "description": "Path to the file to read",
+                 "example": "path/to/file.txt"
+             },
+             "line_start": {
+                 "type": "integer",
+                 "description": "Line number to start reading from",
+                 "example": 0
+             },
+             "line_end": {
+                 "type": "integer",
+                 "description": "Line number to end reading at",
+                 "example": 30
+             }
+         })
+class ReadFileCommand(Command):
+    """
+    Read lines from a text file, abort if the file is binary.
+
+    Example:
+    {
+        "action": "read",
+        "target": "example.txt",
+        "line_start": 0,
+        "line_end": 30
+    }
+    """
+
+    def execute(self, context: CommandContext) -> Dict[str, Any]:
+        target_path = context.working_dir / self.data["target"]
+        line_start = self.data.get("line_start", 0)
+        line_end = self.data.get("line_end", 30)
+
+        if context.dry_run:
+            return {"status": "would read", "path": str(target_path)}
+
+        if is_binary_file(target_path):
+            raise ExecutionError(f"Cannot read binary file: {target_path}")
+
+        try:
+            with open(target_path, 'r', encoding='utf-8') as file:
+                lines = file.readlines()
+
+            if line_start < 0 or line_start >= len(lines):
+                line_start = 0
+            if line_end <= 0 or line_end > len(lines):
+                line_end = min(line_start + 30, len(lines))
+
+            selected_lines = lines[line_start:line_end]
+            file_continues = line_end < len(lines)
+
+            result = {
+                "status": "read",
+                "path": str(target_path),
+                "content": ''.join(selected_lines),
+                "line_start": line_start,
+                "line_end": line_end,
+                "file_continues": file_continues
+            }
+
+            if file_continues:
+                result["message"] = f"File continues beyond line {line_end}."
+
+            return result
+
+        except Exception as e:
+            raise ExecutionError(f"Failed to read file: {e}")
+
+@command("list_dir", color="cyan",
+         properties={
+             "path": {
+                 "type": "string",
+                 "description": "Path to list (defaults to current directory)",
+                 "example": "path/to/dir"
+             }
+         })
+class ListDirectoryCommand(Command):
+    """
+    List files and folders in the specified directory.
+
+    Example:
+    {
+        "action": "list_dir",
+        "path": "path/to/dir"
+    }
+    """
+
+    def execute(self, context: CommandContext) -> Dict[str, Any]:
+        path = self.data.get("path", ".")
+        target_path = context.working_dir / path
+
+        if context.dry_run:
+            return {"status": "would list", "path": str(target_path)}
+
+        try:
+            if context.docker_env:
+                stdout, stderr = context.docker_env.execute(f"ls -al {target_path}")
+                if stderr:
+                    raise ExecutionError(stderr)
+                items = stdout.splitlines()
+            else:
+                items = []
+                for item in os.listdir(target_path):
+                    item_path = os.path.join(target_path, item)
+                    if os.path.isfile(item_path):
+                        items.append(f"- {item}")
+                    elif os.path.isdir(item_path):
+                        items.append(f"d {item}")
+
+            return {
+                "status": "listed",
+                "path": str(target_path),
+                "items": items
+            }
+        except Exception as e:
+            raise ExecutionError(f"Failed to list directory: {e}")

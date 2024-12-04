@@ -167,4 +167,16 @@ coda_output
 
 ## Performance Analysis
 
-There are a few key metrics that are important to consider when evaluating the performance of the system.
+There are a few key metrics that are important to consider when evaluating the performance of the system. First, we must consider the latency-per-iteration. Note that it seems that it actually takes slightly longer to generate each step due to the json syntax and the extra tokens it requires. In my testing, I tracked the number of tokens generated and the total time taken to execute the code. I believe these are accurate performance measurements since GPT performance (tokens/sec) varies, and my temperature is zero so I should always get consistent output. 
+
+| Task                  | Total Tokens Generated | Total Time Executing Code |
+|-----------------------|------------------------|---------------------------|
+| Image Processing (V1) | 1025 (3 iterations)    | 3.21s                     |
+| Image Processing (V2) | 765  (4 iterations)    | 2.58s                     |
+| Markdown to HTML (V1) | 1019  (4 iterations)   | 2.51s                     |
+| Markdown to HTML (V2) | 733   (4 iterations)   | 2.32s                     |
+| Status Checker (V1)   | 1114  (3 iterations)   | 8.85s                     |
+| Status Checker (V2)   | 839   (3 iterations)   | 6.91s                     |
+
+
+The second metric is the total time taken to execute the code. This is important because it gives us an idea of code efficiency. Generally it seems that the JSON implementation is much more efficient in both time and token usage. This is likely because the new mechanism allows for retained states; a lot of the tokens used to generate code in V1 was used to set up the environment multiple times, but by using the JSON format, the LLM had a better idea of what it had already run and what the environment was setup as.
