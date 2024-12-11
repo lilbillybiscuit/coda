@@ -8,14 +8,31 @@ from src.prompt_manager import PromptManager
 from src.formatting import Color
 from src.json_executor import JsonExecutor
 import json
-from src.commands.base import CommandError, CommandRegistry
+from src.commands.base import CommandError, CommandRegistry, CommandResult
 import threading
 import time
 from src.commands.execute_commands import prompt_for_permission
 from src.timer import Timer
-client = OpenAI()
+client = OpenAI(
+    base_url="https://gptapi.lilbillbiscuit.com/",
+    api_key="sk-7XSRngxn8CIfEMROtsr3Qw"
+)
 
 logging.basicConfig(level=logging.WARN)
+
+current_prompt="""Write an efficient matrix multiplication program in Rust. 
+Read Two Matrices from Input Files:
+matrix_a.txt: Contains the first matrix.
+matrix_b.txt: Contains the second matrix.
+Each file represents a matrix with one row per line, and elements in each row separated by spaces. It is guaranteed that the number of columns in matrix_a.txt equals the number of rows in matrix_b.txt.
+Perform Matrix Multiplication:
+Compute the product of Matrix A and Matrix B.
+Exclude computations involving zero elements where possible to enhance performance.
+Write the Resulting Matrix to an Output File:
+output.txt: Contains the resulting product matrix.
+Format the output similarly to the input files (one row per line, elements separated by spaces).
+You are only allowed to use built-in Rust functions and functions Rust standard library. External dependencies are unallowed.
+"""
 
 
 class CODA:
@@ -47,13 +64,14 @@ class CODA:
 
     def i_get_user_input(self):
         """Get task description and working directory from user."""
-        task_description = Color.colorize_input("white", bold=True, text="Enter the task description: ").strip()
-        working_directory = Color.colorize_input("white", bold=True,
-                                                 text="Enter the path to the working directory: ").strip()
-
-        if working_directory == "":
-            working_directory = "/workspace"
-        return task_description, working_directory
+        # task_description = Color.colorize_input("white", bold=True, text="Enter the task description: ", multiline=True).strip()
+        # working_directory = Color.colorize_input("white", bold=True,
+        #                                          text="Enter the path to the working directory: ").strip()
+        #
+        # if working_directory == "":
+        #     working_directory = "/workspace"
+        # return task_description, working_directory
+        return current_prompt, "/workspace"
 
     def c_generate_commands(self, task_description: str, working_directory: str, callback: Optional[callable] = None):
         """Generate commands based on task description."""
@@ -65,6 +83,8 @@ class CODA:
             "Each command should be atomic and focused. Format the response as a valid JSON array without explanations or markdown. For execute commands, you can assume that you are running these commands in a shell -- no need to write bash as the main command"
             f"Available commands and their schemas:\n{json.dumps(self.json_executor.get_command_docs(), indent=2)}"
             "Return only a JSON array of commands. Each command should include a 'summary' field."
+            "If there has been multiple attempts of the same command without success, or if you are completely stuck, you can use the giveup command"
+            "Suggestions:"
         )
 
         prompt = f"""
@@ -72,6 +92,7 @@ class CODA:
         {task_description}
 
         Working directory: {working_directory}
+        You may assume that commands with output results have already been executed in the environment.
         """
 
         self.prompt_manager.add_message("user", prompt)
@@ -89,7 +110,6 @@ class CODA:
             return commands
         except json.JSONDecodeError:
             raise ValueError("Failed to parse commands as JSON")
-
     def print_command_summary(self, commands: List[Dict[str, Any]]):
         """Print a summary of commands to be executed."""
         Color.colorize("yellow", bold=True, text="\nCommands to execute:")
@@ -99,14 +119,13 @@ class CODA:
 
             # Get command color from registry
             command_class = CommandRegistry.get_command(action)
-            color = getattr(command_class, 'color', 'white') if command_class else 'white'
+            color = getattr(command_class, 'color', 'none') if command_class else 'none'
 
             Color.colorize(color, bold=True, text=f"\n{i}. [{action.upper()}]")
             print(f" {summary}")
 
-
     def e_execute_commands(self, commands: List[Dict[str, Any]], working_directory: str) -> Tuple[
-        List[Dict[str, Any]], Optional[str], bool]:
+        List[CommandResult], Optional[str], bool]:
         """Execute the generated commands. Returns (results, error, is_complete)"""
         results = []
         is_complete = False
@@ -116,58 +135,70 @@ class CODA:
                 action = command.get('action', 'unknown')
                 summary = command.get('summary', 'No description provided')
 
-                # Get command color from registry
                 command_class = CommandRegistry.get_command(action)
                 color = getattr(command_class, 'color', 'white') if command_class else 'white'
 
                 Color.colorize(color, bold=True,
                                text=f"\n→ {i}/{len(commands)} [{action.upper()}] {summary}")
 
-                # Show spinner for execute commands
                 result = self.json_executor.execute(command)
 
                 results.extend(result)
 
                 # Print immediate result feedback
                 for r in result:
-                    if r.get("status") == "completed":
-                        Color.colorize("green", bold=True, text=f"✓ {r['message']}")
-                    elif "stdout" in r and r["stdout"].strip():
+                    if r.status == "completed":
+                        Color.colorize("green", bold=True, text=f"✓ {r.summary}")
+                    elif r.status == "giveup":
+                        Color.colorize("red", bold=True, text=f"✗ {r.summary}")
+                        response = Color.colorize_input("white", bold=True,
+                                                        text="Do you want to end the current task? (y/n): ").lower()
+                        if response.startswith('y'):
+                            return results, None, True
+                    elif r.stdout.strip() != "":
+                        Color.colorize(color, bold=False, text=f"→ {r.status}: {r.path}")
                         print("\nOutput:")
-                        print(r["stdout"].strip())
-                    elif r.get("status"):
-                        Color.colorize(color, bold=False, text=f"→ {r['status']}: {r.get('path', '')}")
+                        print(r.stdout.strip())
+                    elif r.status:
+                        Color.colorize(color, bold=False, text=f"→ {r.status}: {r.path}")
 
-                    # Check for errors in the result
-                    if r.get("stderr") and r["stderr"].strip():
-                        error_msg = r["stderr"].strip()
-                        Color.colorize("red", bold=True, text=f"\n✗ Command failed:")
-                        Color.colorize("red", bold=False, text=error_msg)
-                        return results, error_msg, False
+                    if not r.success:
+                        raise CommandError(f"Command failed: {r.stderr}")
 
                 if action == "complete":
                     is_complete = True
                     break
 
             except CommandError as e:
-                error_msg = str(e)
+                error_msg = f"Command Error: {str(e)}"
                 Color.colorize("red", bold=True, text=f"\n✗ Command failed:")
                 Color.colorize("red", bold=False, text=error_msg)
 
-                # Show which command failed in the sequence
                 remaining = len(commands) - i
                 if remaining > 0:
                     Color.colorize("yellow", bold=True,
                                    text=f"\nSkipping {remaining} remaining command{'s' if remaining > 1 else ''}")
 
                 return results, error_msg, False
+
             except Exception as e:
-                error_msg = f"Unexpected error: {str(e)}"
+                error_msg = f"Unexpected Error: {str(e)}"
                 Color.colorize("red", bold=True, text=f"\n✗ Command failed:")
                 Color.colorize("red", bold=False, text=error_msg)
                 return results, error_msg, False
 
         return results, None, is_complete
+
+
+def make_output_prompt(results: List[CommandResult], error: Optional[str] = None):
+    output_prompt = "PROGRAM RESULT:"
+    for result in results:
+        output_prompt += f"\n{result}\n"
+
+    if error:
+        output_prompt += f"\nERROR OCCURRED:\n{error}\n"
+
+    return output_prompt
 
 def main():
     docker_config = DockerConfig()
@@ -179,53 +210,66 @@ def main():
         json_executor = JsonExecutor(working_dir="/workspace", docker_env=docker_env)
         coda = CODA(docker_config, prompt_manager, json_executor)
 
-        task_description, working_directory = coda.i_get_user_input()
-        docker_env.execute(f"mkdir -p {working_directory}")
+        try:
+            task_description, working_directory = coda.i_get_user_input()
+            docker_env.execute(f"mkdir -p {working_directory}")
 
-        Color.colorize("green", bold=True, text="Task Description:")
-        Color.colorize("green", bold=False, text=task_description)
+            Color.colorize("green", bold=True, text="Task Description:")
+            Color.colorize("green", bold=False, text=task_description)
 
-        with Timer("Total Session"):
-            while True:
-                with Timer("Command Generation Loop"):
-                    # Generate commands
-                    Color.colorize("yellow", bold=True, text="\nGenerating Commands:")
-                    Color.start_color("grey")
-                    commands = coda.c_generate_commands(task_description, working_directory,
-                                                        lambda x: print(x, end='', flush=True))
-                    Color.end_color()
+            with Timer("Total Session"):
+                while True:
+                    try:
+                        with Timer("Command Generation Loop"):
+                            # Generate commands
+                            Color.colorize("none", bold=True, text="\nGenerating Commands:")
+                            Color.start_color("grey")
+                            commands = coda.c_generate_commands(task_description, working_directory,
+                                                               lambda x: print(x, end='', flush=True))
+                            Color.end_color()
 
-                with Timer("Command Execution Loop"):
-                    # Execute commands
-                    Color.colorize("blue", bold=True, text="\nExecuting Commands:")
-                    results, error, is_complete = coda.e_execute_commands(commands, working_directory)
+                        with Timer("Command Execution Loop"):
+                            # Execute commands
+                            Color.colorize("blue", bold=True, text="\nExecuting Commands:")
+                            results, error, is_complete = coda.e_execute_commands(commands, working_directory)
 
-                    # save results to chat history
-                    result_prompt = f"\nPROGRAM RESULTS:\n{json.dumps(results, indent=2)}"
-                    prompt_manager.add_message("user", result_prompt)
+                            # save results to chat history including any errors
+                            prompt_manager.add_message("user", make_output_prompt(results, error))
 
-                    if error:
-                        Color.colorize("red", bold=True, text=f"\nExecution stopped due to error")
+                            if error:
+                                Color.colorize("red", bold=True, text=f"\nExecution stopped due to error")
+                                continue
+
+                            if is_complete:
+                                Color.colorize("green", bold=True, text="\nTask completed successfully!")
+                                follow_up = Color.colorize_input("none", bold=True, multiline=True,
+                                                                text="Enter a follow-up task description (or press Enter to exit): ").strip()
+                                if not follow_up:
+                                    print("Exiting CODA.")
+                                    break
+                                else:
+                                    task_description = follow_up
+
+                    except Exception as e:
+                        error_msg = f"Unexpected error during execution: {str(e)}"
+                        Color.colorize("red", bold=True, text=f"\n✗ {error_msg}")
+                        # Add the error to the chat history
+                        prompt_manager.add_message("user", make_output_prompt([], error_msg))
                         continue
 
-                    if is_complete:
-                        Color.colorize("green", bold=True, text="\nTask completed successfully!")
-                        follow_up = Color.colorize_input("white", bold=True,
-                                                         text="Enter a follow-up task description (or press Enter to exit): ").strip()
-                        if not follow_up:
-                            save_chat = Color.colorize_input("white", bold=True,
-                                                             text="Save chat history? (y/n): ").lower() == 'y'
-                            if save_chat:
-                                prompt_manager.save_history("coda_data/chat_history.json")
-                                print("\nChat history saved.")
-                            print("Exiting CODA.")
-                            break
-                        else:
-                            task_description = follow_up
-                            # keep_context = Color.colorize_input("white", bold=True,
-                            #                                     text="Keep context for next task? (y/n): ").lower() == 'y'
-                            # if not keep_context:
-                            #     prompt_manager.clear_history()
-                            # print()
+        except KeyboardInterrupt:
+            Color.colorize("yellow", bold=True, text="\nReceived keyboard interrupt, shutting down...")
+        except Exception as e:
+            error_msg = f"Critical error: {str(e)}"
+            Color.colorize("red", bold=True, text=f"\n✗ {error_msg}")
+            # Add the error to the chat history
+            prompt_manager.add_message("user", make_output_prompt([], error_msg))
+        finally:
+            save_prompt = Color.colorize_input("none", bold=True,
+                                              text="Save chat history before exit? (y/n): ").lower()
+            if save_prompt == 'y':
+                prompt_manager.save_history("coda_data/chat_history.json")
+                print("\nChat history saved.")
+
 if __name__ == "__main__":
     main()

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 PathStr: TypeAlias = str
 EnvVars: TypeAlias = Dict[str, str]
 VolumeConfig: TypeAlias = Dict[str, Dict[str, str]]
-CommandOutput: TypeAlias = Tuple[str, str]
+CommandOutput: TypeAlias = Tuple[str, str, int]
 
 
 class DockerConfig:
@@ -55,13 +55,14 @@ class DockerEnvironment:
         self.container: Optional[Container] = None
 
         # Set up volume directories with proper structure
-        base_path: Path = Path("./docker_data").absolute()
-        base_path.mkdir(parents=True, exist_ok=True)
+        self.base_path: Path = Path("./docker_data").absolute()
+        self.base_path.mkdir(parents=True, exist_ok=True)
 
         # Initialize container_volumes
         self.container_volumes = {}
+        self.volume_paths = {}  # Add this to store the local paths
         for name, mount_point in self.config.config["volumes"].items():
-            volume_path = base_path / name
+            volume_path = self.base_path / name
             volume_path.mkdir(parents=True, exist_ok=True)
             # Ensure host directory has proper permissions
             os.chmod(volume_path, 0o777)
@@ -70,6 +71,7 @@ class DockerEnvironment:
                 'bind': mount_point,
                 'mode': 'rw'
             }
+            self.volume_paths[name] = volume_path  # Store the local path
 
         self._ensure_container()
 
@@ -190,6 +192,19 @@ class DockerEnvironment:
                 self.container.start()
                 self.container.reload()
 
+            exec_env = {**os.environ.copy(),
+                        **self.config.config["environment"]}
+
+            # Merge environments in priority order:
+            # 1. Command-specific environment (passed as parameter)
+            # 2. Container default environment
+            # 3. Host environment
+            # TODO: environment variables will persist. Ensure this is communicated to the user
+            if environment:
+                # Ensure all environment variables are strings
+                environment = {str(k): str(v) for k, v in environment.items()}
+                exec_env.update(environment)
+
             result = self.container.exec_run(
                 cmd=command,
                 workdir=workdir or self.config.config["working_dir"],
@@ -198,13 +213,14 @@ class DockerEnvironment:
                 demux=True
             )
 
-            if stream:
-                return self._handle_stream(result)
+            # if stream:
+            #     return self._handle_stream(result)
 
             stdout: str = result.output[0].decode() if result.output[0] else ""
             stderr: str = result.output[1].decode() if result.output[1] else ""
+            exit_code: int = result.exit_code
 
-            return stdout, stderr
+            return stdout, stderr, exit_code
 
         except (NotFound, APIError) as e:
             logger.error(f"Command execution failed: {e}")
@@ -317,33 +333,6 @@ class DockerEnvironment:
         except Exception as e:
             logger.error(f"Failed to copy from container: {e}")
             raise
-
-    def execute_script(self, script: str, working_directory: str) -> Tuple[str, str]:
-        """Execute a script in the container"""
-        if not self.container:
-            raise RuntimeError("No container available")
-
-        try:
-            # Create scripts directory if it doesn't exist
-            script_dir = self.volumes["scripts"]["bind"]
-            self.execute(f"mkdir -p {script_dir}")
-
-            # Generate unique script name
-            script_name = f"task_{os.urandom(4).hex()}.sh"
-            script_path = os.path.join(script_dir, script_name)
-
-            # Copy script to container
-            self.copy_to_container(script, script_path)
-
-            # Make script executable
-            self.execute(f"chmod +x {script_path}")
-
-            # Execute script
-            return self.execute(
-                f"bash {script_path}",
-                workdir=working_directory
-            )
-
-        except Exception as e:
-            logger.error(f"Script execution failed: {e}")
-            return "", str(e)
+    def get_workspace_path(self) -> Path:
+        """Get the local filesystem path for the workspace volume"""
+        return self.volume_paths["workspace"]

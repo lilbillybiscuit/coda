@@ -150,7 +150,7 @@ As many of these can be added as needed, and the system will automatically handl
 
 My outputs are correct, the as before. My results are in the coda_output directory, organized into the following structure:
 ```
-coda_output
+coda_output[file_commands.py](src/commands/file_commands.py)
 ├── 1_image_processing
 │   ├── chat_history.json
 │   ├── chat_log.txt

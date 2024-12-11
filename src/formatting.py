@@ -11,7 +11,8 @@ color_mapping = {
     "black": "\033[30m",
     "gray": "\033[90m",
     "grey": "\033[90m",
-    "reset": "\033[0m"
+    "reset": "\033[0m",
+    "none": ""
 }
 
 class Color:
@@ -30,12 +31,22 @@ class Color:
 
     # same method as above, but for input. use the above method for output
     @staticmethod
-    def colorize_input(color: str, text:str, bold: bool = False, italic: bool = False, **kwargs)->str:
+    def colorize_input(color: str, text: str, bold: bool = False, italic: bool = False, multiline: bool = False, **kwargs) -> str:
         """Return colored text string with optional bold and italic formatting"""
         if 'end' not in kwargs:
             kwargs['end'] = ' '
         Color.colorize(color, text, bold, italic, **kwargs)
-        return input()
+
+        if multiline:
+            lines = []
+            while True:
+                line = input()
+                if line == "":
+                    break
+                lines.append(line)
+            return "\n".join(lines)
+        else:
+            return input()
 
 
     @staticmethod

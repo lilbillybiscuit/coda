@@ -25,10 +25,17 @@ RUN useradd -m -s /bin/bash coda && \
     usermod -aG sudo coda && \
     echo "coda ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
+# Install Rust
+
+
 
 WORKDIR /workspace
 RUN chown coda:coda /workspace
 USER coda
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/home/coda/.cargo/bin:${PATH}"
+RUN rustup default stable
 
 # Command to keep container running
 CMD ["tail", "-f", "/dev/null"]

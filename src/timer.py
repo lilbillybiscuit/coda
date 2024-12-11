@@ -1,6 +1,6 @@
 import time
 from src.formatting import Color
-ENABLE_TIMING = True  # Global switch for timing measurements
+ENABLE_TIMING = False  # Global switch for timing measurements
 
 
 class Timer:

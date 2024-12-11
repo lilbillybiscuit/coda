@@ -9,7 +9,7 @@ from functools import wraps
 import jsonschema
 from typing_extensions import get_type_hints
 from typing import Dict, Any, List, Callable, Optional, Type, ClassVar, Union
-from src.commands.base import CommandContext, ValidationError, ExecutionError, CommandRegistry
+from src.commands.base import CommandContext, ValidationError, ExecutionError, CommandRegistry, CommandResult
 from src.docker_env import DockerEnvironment
 from src.formatting import Color
 
@@ -27,7 +27,7 @@ class JsonExecutor:
         self.working_dir = Path(working_dir).resolve()
         self.docker_env = docker_env
 
-    def execute(self, json_data: Union[str, Dict, List], dry_run: bool = False) -> List[Dict[str, Any]]:
+    def execute(self, json_data: Union[str, Dict, List], dry_run: bool = False) -> List[CommandResult]:
         try:
             if isinstance(json_data, str):
                 commands = json.loads(json_data)
@@ -52,12 +52,9 @@ class JsonExecutor:
 
                 command = command_class(cmd_data)
                 result = command.execute(context)
-                if "summary" in result:
-                    logger.warn("Summary should not be used in command results")
 
-                result["summary"] = cmd_data.get("summary", "")
+                result.set_summary(cmd_data.get("summary", ""))
                 results.append(result)
-
 
             return results
 

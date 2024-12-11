@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, Callable, Optional, Type, ClassVar, Union
-from src.commands.base import Command, CommandContext, ValidationError, ExecutionError, command
+from src.commands.base import Command, CommandContext, ValidationError, ExecutionError, command, CommandResult
 from pathlib import Path
 import os
 
@@ -41,12 +41,13 @@ class CreateFileCommand(Command):
         "in_container": true
     }
     """
-    def execute(self, context: CommandContext) -> Dict[str, Any]:
+    def execute(self, context: CommandContext) -> CommandResult:
         target_path = context.working_dir / self.data["target"]
         in_container = self.data.get("in_container", False)
 
         if context.dry_run:
-            return {"status": "would create", "path": str(target_path)}
+            return CommandResult.success("would create", path=str(target_path))
+
 
         try:
             if context.docker_env:
@@ -67,29 +68,16 @@ class CreateFileCommand(Command):
                 if "mode" in self.data:
                     target_path.chmod(int(self.data["mode"], 8))
 
-            return {"status": "created", "path": str(target_path)}
+            return CommandResult.success("created", path=str(target_path))
         except Exception as e:
             raise ExecutionError(f"Failed to create file: {e}")
 
-
-@command("append", color="blue",
+@command("append",
          required=["target", "content"],
          properties={
-             "target": {
-                 "type": "string",
-                 "description": "File to append content to",
-                 "example": "log.txt"
-             },
-             "content": {
-                 "type": "string",
-                 "description": "Content to append to the file",
-                 "example": "New log entry"
-             },
-             "newline": {
-                 "type": "boolean",
-                 "description": "Whether to add a newline before the content",
-                 "example": True
-             }
+             "target": {"type": "string"},
+             "content": {"type": "string"},
+             "newline": {"type": "boolean"}
          })
 class AppendFileCommand(Command):
     """
@@ -104,28 +92,34 @@ class AppendFileCommand(Command):
     }
     """
 
-    def execute(self, context: CommandContext) -> Dict[str, Any]:
+    def execute(self, context: CommandContext) -> CommandResult:
         target_path = context.working_dir / self.data["target"]
         content = self.data["content"]
         if self.data.get("newline", True):
             content = f"\n{content}"
 
         if context.dry_run:
-            return {"status": "would append", "path": str(target_path)}
+            return CommandResult.success("would append", path=str(target_path))
 
         try:
             if context.docker_env:
-                current, _ = context.docker_env.execute(f"cat {target_path}")
+                current, stderr, exit_code = context.docker_env.execute(f"cat {target_path}")
                 new_content = current + content
                 context.docker_env.copy_to_container(new_content, str(target_path))
             else:
                 with open(target_path, 'a') as f:
                     f.write(content)
-            return {"status": "appended", "path": str(target_path)}
+            return CommandResult.success(
+                "appended",
+                path=str(target_path),
+                stdout="",
+                stderr=""
+            )
         except Exception as e:
-            raise ExecutionError(f"Failed to append: {e}")
-
-
+            return CommandResult.error(
+                str(e),
+                path=str(target_path)
+            )
 @command("delete", color="red",
          required=["target"],
          properties={
@@ -143,18 +137,19 @@ class DeleteFileCommand(Command):
         "force": true
     }
     """
-    def execute(self, context: CommandContext) -> Dict[str, Any]:
+    def execute(self, context: CommandContext) -> CommandResult:
         target_path = context.working_dir / self.data["target"]
         force = self.data.get("force", False)
 
         if context.dry_run:
-            return {"status": "would delete", "path": str(target_path)}
+            # return {"status": "would delete", "path": str(target_path)}
+            return CommandResult.success("would delete", path=str(target_path))
 
         try:
             if context.docker_env:
                 # Use force remove (-f) if specified
                 force_flag = "-f" if force else ""
-                stdout, stderr = context.docker_env.execute(f"rm {force_flag} {target_path}")
+                stdout, stderr, exit_code = context.docker_env.execute(f"rm {force_flag} {target_path}")
 
                 if stderr:
                     raise ExecutionError(stderr)
@@ -165,7 +160,8 @@ class DeleteFileCommand(Command):
                 elif not force:
                     raise ExecutionError(f"File not found: {target_path}")
 
-            return {"status": "deleted", "path": str(target_path)}
+            # return {"status": "deleted", "path": str(target_path)}
+            return CommandResult.success("deleted", path=str(target_path))
         except Exception as e:
             raise ExecutionError(f"Failed to delete file: {e}")
 
@@ -211,19 +207,32 @@ class ReadFileCommand(Command):
     }
     """
 
-    def execute(self, context: CommandContext) -> Dict[str, Any]:
-        target_path = context.working_dir / self.data["target"]
+    def execute(self, context: CommandContext) -> CommandResult:
+        if not context.docker_env:
+            return CommandResult.error(
+                "Docker environment required for file operations",
+                path=str(self.data["target"])
+            )
+
+        # Get workspace path from Docker environment
+        workspace_path = context.docker_env.get_workspace_path()
+        target_path = self.data["target"]
+        local_path = workspace_path / target_path
+
         line_start = self.data.get("line_start", 0)
         line_end = self.data.get("line_end", 30)
 
         if context.dry_run:
-            return {"status": "would read", "path": str(target_path)}
-
-        if is_binary_file(target_path):
-            raise ExecutionError(f"Cannot read binary file: {target_path}")
+            return CommandResult.success("would read", path=str(target_path))
 
         try:
-            with open(target_path, 'r', encoding='utf-8') as file:
+            if not local_path.exists():
+                return CommandResult.error(
+                    f"File not found: {target_path}",
+                    path=str(target_path)
+                )
+
+            with open(local_path, 'r') as file:
                 lines = file.readlines()
 
             if line_start < 0 or line_start >= len(lines):
@@ -234,22 +243,33 @@ class ReadFileCommand(Command):
             selected_lines = lines[line_start:line_end]
             file_continues = line_end < len(lines)
 
-            result = {
-                "status": "read",
-                "path": str(target_path),
-                "content": ''.join(selected_lines),
-                "line_start": line_start,
-                "line_end": line_end,
-                "file_continues": file_continues
-            }
+            result = CommandResult.success(
+                "read",
+                path=str(target_path),
+                stdout=''.join(selected_lines),
+                other={
+                    "line_start": line_start,
+                    "line_end": line_end,
+                    "file_continues": file_continues
+                }
+            )
 
             if file_continues:
-                result["message"] = f"File continues beyond line {line_end}."
+                result.message = f"File continues beyond line {line_end}."
 
             return result
 
+        except UnicodeDecodeError:
+            return CommandResult.error(
+                "Cannot read binary file",
+                path=str(target_path)
+            )
         except Exception as e:
-            raise ExecutionError(f"Failed to read file: {e}")
+            return CommandResult.error(
+                str(e),
+                path=str(target_path)
+            )
+
 
 @command("list_dir", color="cyan",
          properties={
@@ -270,16 +290,16 @@ class ListDirectoryCommand(Command):
     }
     """
 
-    def execute(self, context: CommandContext) -> Dict[str, Any]:
+    def execute(self, context: CommandContext) -> CommandResult:
         path = self.data.get("path", ".")
         target_path = context.working_dir / path
 
         if context.dry_run:
-            return {"status": "would list", "path": str(target_path)}
-
+            # return {"status": "would list", "path": str(target_path)}
+            return CommandResult.success("would list", path=str(target_path))
         try:
             if context.docker_env:
-                stdout, stderr = context.docker_env.execute(f"ls -al {target_path}")
+                stdout, stderr, exit_code = context.docker_env.execute(f"ls -al {target_path}")
                 if stderr:
                     raise ExecutionError(stderr)
                 items = stdout.splitlines()
@@ -292,10 +312,16 @@ class ListDirectoryCommand(Command):
                     elif os.path.isdir(item_path):
                         items.append(f"d {item}")
 
-            return {
-                "status": "listed",
-                "path": str(target_path),
-                "items": items
-            }
+            # return {
+            #     "success": True,
+            #     "status": "listed",
+            #     "path": str(target_path),
+            #     "output": items
+            # }
+            return CommandResult.success(
+                "listed",
+                path=str(target_path),
+                output=items,
+            )
         except Exception as e:
             raise ExecutionError(f"Failed to list directory: {e}")

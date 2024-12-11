@@ -1,5 +1,5 @@
 from typing import Dict, Any, List, Callable, Optional, Type, ClassVar, Union
-from src.commands.base import Command, CommandContext, ValidationError, ExecutionError, command
+from src.commands.base import Command, CommandContext, ValidationError, ExecutionError, command, CommandResult
 import shlex
 from src.formatting import Color
 
@@ -28,9 +28,42 @@ class CompleteCommand(Command):
         "success": true
     }
     """
-    def execute(self, context: CommandContext) -> Dict[str, Any]:
-        return {
-            "status": "completed",
-            "message": self.data["message"],
-            "success": self.data.get("success", True)
-        }
+
+    def execute(self, context: CommandContext) -> CommandResult:
+        return CommandResult(
+            status="completed",
+            success=self.data.get("success", True),
+            path="",
+            stdout="",
+            stderr="",
+            summary=self.data["message"]
+        )
+
+@command("giveup", color="red",
+         properties={
+             "message": {
+                 "type": "string",
+                 "description": "Message explaining why giving up",
+                 "example": "Unable to complete task due to permission issues"
+             }
+         })
+class GiveUpCommand(Command):
+    """
+    End the current task loop with a give up message.
+
+    Example:
+    {
+        "action": "giveup",
+        "message": "Unable to complete task due to permission issues"
+    }
+    """
+
+    def execute(self, context: CommandContext) -> CommandResult:
+        return CommandResult(
+            status="giveup",
+            success=False,
+            path="",
+            stdout="",
+            stderr="",
+            summary=self.data.get("message", "Task abandoned")
+        )
