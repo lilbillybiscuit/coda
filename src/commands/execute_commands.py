@@ -62,7 +62,7 @@ class ExecuteCommand(Command):
         "sort", "uniq", "diff", "tar", "gzip", "gunzip"
     }
 
-    TIMEOUT_SECONDS = 30
+    TIMEOUT_SECONDS = 60
 
     def is_command_safe(self, cmd_str: str) -> bool:
         """Check if the shell command is in the whitelist"""

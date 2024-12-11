@@ -36,7 +36,7 @@ class CompleteCommand(Command):
             path="",
             stdout="",
             stderr="",
-            summary=self.data["message"]
+            message=self.data["message"]
         )
 
 @command("giveup", color="red",
@@ -65,5 +65,5 @@ class GiveUpCommand(Command):
             path="",
             stdout="",
             stderr="",
-            summary=self.data.get("message", "Task abandoned")
+            message=self.data.get("message", "Task abandoned")
         )

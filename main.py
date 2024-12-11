@@ -10,6 +10,7 @@ from src.json_executor import JsonExecutor
 import json
 from src.commands.base import CommandError, CommandRegistry, CommandResult
 import threading
+import copy
 import time
 from src.commands.execute_commands import prompt_for_permission
 from src.timer import Timer
@@ -40,6 +41,7 @@ class CODA:
         self.docker_config = docker_config
         self.prompt_manager = prompt_manager
         self.json_executor = json_executor
+        self.prompt_manager_snapshot = None
 
     def call_openai_api(self, callback: Optional[callable] = None):
         messages = self.prompt_manager.get_messages()
@@ -76,23 +78,68 @@ class CODA:
     def c_generate_commands(self, task_description: str, working_directory: str, callback: Optional[callable] = None):
         """Generate commands based on task description."""
         self.prompt_manager.set_system_message(
-            "You are an AI assistant that generates commands to accomplish tasks in a Linux environment. "
-            "Return a JSON array of command objects. Available commands: create, append, execute, delete, complete. "
+            "You are an AI programmer that writes highly optimized to accomplish tasks in a Linux environment."
             "Use the 'complete' command when you determine the task is finished. Do NOT write complete until you have seen 'PROGRAM RESULT' in the chat history."
-            "Each command should include a 'summary' field that briefly describes what the command does. "
-            "Each command should be atomic and focused. Format the response as a valid JSON array without explanations or markdown. For execute commands, you can assume that you are running these commands in a shell -- no need to write bash as the main command"
+            "Return only a JSON array of commands without explanations or markdown. Each command should be atomic and focused. Each command should include a 'summary' field that briefly describes what the command does. "
+            "For execute commands, you can assume that you are running these commands in a shell -- no need to write bash as the main command"
             f"Available commands and their schemas:\n{json.dumps(self.json_executor.get_command_docs(), indent=2)}"
-            "Return only a JSON array of commands. Each command should include a 'summary' field."
             "If there has been multiple attempts of the same command without success, or if you are completely stuck, you can use the giveup command"
-            "Suggestions:"
         )
 
         prompt = f"""
+        Hint: Try not to re-run the same command if it has already been executed
+        Write and compile code using the fastest way possible, as long as it is correct. This includes using compiler optimization flags (-C opt-level=3), etc.
+        
+        If there are missing items in the environment, please install them as a separate command sequence before moving on.
+        After you've solved the task, write code to check your work (for example with python libraries) and time it.
+        If your output is incorrect, use debugging techniques to figure out why, and go from there.
+        
         Generate commands for the following task:
         {task_description}
 
         Working directory: {working_directory}
         You may assume that commands with output results have already been executed in the environment.
+        
+        """
+
+        self.prompt_manager.add_message("user", prompt)
+        response = self.call_openai_api(callback=callback)
+
+        if "```" in response[:7]:
+            response_split = response.split("\n")[1:-1]
+            response = "\n".join(response_split)
+
+
+        try:
+            commands = json.loads(response)
+            if not isinstance(commands, list):
+                commands = [commands]
+            return commands
+        except json.JSONDecodeError:
+            raise ValueError("Failed to parse commands as JSON")
+    def c_generate_optimization_task(self, task_description: str, working_directory: str, callback: Optional[callable] = None):
+        """Generate commands based on task description."""
+        self.prompt_manager.set_system_message(
+            "You are an AI assistant that suggests optimization strategies for a given task. You are NOT writing code, but merely suggestion optimization strategies as a result of your observations"
+            "Return only a JSON array of commands without explanations or markdown. Each command should be atomic and focused. Each command should include a 'summary' field that briefly describes what the command does. "
+            "For execute commands, you can assume that you are running these commands in a shell -- no need to write bash as the main command"
+            f"Available commands and their schemas:\n{json.dumps(self.json_executor.get_command_docs(), indent=2)}"
+            "If there has been multiple attempts of the same command without success, or if you are completely stuck, you can use the giveup command"
+            "Use the 'complete' command when you have finished coming up with your suggestion. Let the completion message be your suggestion. DO NOT write complete until you are sure you have all the details you need to make a suggestion; when it is called it should only be a single command."
+            "Hint: Pay attention to the following components: cache sizes, CPU architecture details, SIMD instructions, memory access patterns, and parallelism, algorithmic optimizations, among others."
+            "Hint: Use commands to get the information you need about the execution environment, the task itself, details about the current implementation, etc."
+        )
+
+        prompt = f"""
+        Use the 'complete' command when you have finished coming up with your suggestion. Let the completion message be your suggestion. DO NOT write complete until you are sure you have all the details you need to make a suggestion; when it is called it should only be a single command.
+        After reading the previous work, please suggest to the programmer optimization techniques that will make the code run faster. You will likely need to make low-level optimization suggestions specific to the hardware.
+        The optimization techniques should be clear and concise, and should start with "Alter your code so that..." or "Change the code to...".
+        Commands like lscpu to determine platform details, etc. would be helpful.
+        Suggest one optimization at a time, and hand it off to the programmer to implement.
+
+        Working directory: {working_directory}
+        You may assume that commands with output results have already been executed in the environment.
+        Let the programmer do the main programming, you are only suggesting optimizations based on what you see.
         """
 
         self.prompt_manager.add_message("user", prompt)
@@ -190,6 +237,96 @@ class CODA:
         return results, None, is_complete
 
 
+    def snapshot_prompt_manager(self):
+        """Snapshot the prompt manager for debugging."""
+        self.prompt_manager_snapshot = copy.deepcopy(self.prompt_manager)
+
+    def restore_prompt_manager(self):
+        """Restore the prompt manager from the snapshot."""
+        if self.prompt_manager_snapshot:
+            self.prompt_manager = self.prompt_manager_snapshot
+            self.prompt_manager_snapshot = None
+        else:
+            Color.colorize("yellow", bold=True, text="No prompt manager snapshot to restore")
+            raise ValueError("No prompt manager snapshot to restore")
+def run_standard_agent(coda: CODA, task_description,working_directory: str) -> bool:
+    prompt_manager = coda.prompt_manager
+    Color.colorize("none", bold=True, text="\nStarting Coding Agent...")
+    while True:
+        try:
+            with Timer("Command Generation Loop"):
+                # Generate commands
+                Color.colorize("none", bold=True, text="\nGenerating Commands:")
+                Color.start_color("grey")
+                commands = coda.c_generate_commands(task_description, working_directory,
+                                                    lambda x: print(x, end='', flush=True))
+                Color.end_color()
+
+            with Timer("Command Execution Loop"):
+                # Execute commands
+                Color.colorize("blue", bold=True, text="\nExecuting Commands:")
+                results, error, is_complete = coda.e_execute_commands(commands, working_directory)
+
+                # save results to chat history including any errors
+                prompt_manager.add_message("user", make_output_prompt(results, error))
+
+                if error:
+                    Color.colorize("red", bold=True, text=f"\nExecution stopped due to error")
+                    continue
+
+                if is_complete:
+                    Color.colorize("green", bold=True, text="\nTask completed successfully!")
+                    return True
+
+        except Exception as e:
+            error_msg = f"Unexpected error during execution: {str(e)}"
+            Color.colorize("red", bold=True, text=f"\n✗ {error_msg}")
+            # Add the error to the chat history
+            prompt_manager.add_message("user", make_output_prompt([], error_msg))
+            continue
+
+def run_optimization_agent(coda: CODA, task_description,working_directory: str) -> str:
+    coda.snapshot_prompt_manager()
+    prompt_manager = coda.prompt_manager
+    Color.colorize("none", bold=True, text="\nStarting Optimization Agent...")
+    while True:
+        try:
+            with Timer("Command Generation Loop"):
+                # Generate commands
+                Color.colorize("none", bold=True, text="\nGenerating Commands for Optimization:")
+                Color.start_color("grey")
+                commands = coda.c_generate_optimization_task(task_description, working_directory,
+                                                    lambda x: print(x, end='', flush=True))
+                Color.end_color()
+
+            with Timer("Command Execution Loop"):
+                # Execute commands
+                Color.colorize("blue", bold=True, text="\nExecuting Commands:")
+                results, error, is_complete = coda.e_execute_commands(commands, working_directory)
+
+                # save results to chat history including any errors
+                prompt_manager.add_message("user", make_output_prompt(results, error))
+
+                if error:
+                    Color.colorize("red", bold=True, text=f"\nExecution stopped due to error")
+                    continue
+
+                if is_complete:
+                    completion_message = next((r.message for r in results if r.status == "completed"), None)
+                    coda.restore_prompt_manager()
+                    if completion_message:
+                        return completion_message
+                    else:
+                        Color.colorize("red", bold=True, text="\nNo completion message found")
+                        return ""
+
+        except Exception as e:
+            error_msg = f"Unexpected error during execution: {str(e)}"
+            Color.colorize("red", bold=True, text=f"\n✗ {error_msg}")
+            # Add the error to the chat history
+            prompt_manager.add_message("user", make_output_prompt([], error_msg))
+            continue
+
 def make_output_prompt(results: List[CommandResult], error: Optional[str] = None):
     output_prompt = "PROGRAM RESULT:"
     for result in results:
@@ -219,43 +356,11 @@ def main():
 
             with Timer("Total Session"):
                 while True:
-                    try:
-                        with Timer("Command Generation Loop"):
-                            # Generate commands
-                            Color.colorize("none", bold=True, text="\nGenerating Commands:")
-                            Color.start_color("grey")
-                            commands = coda.c_generate_commands(task_description, working_directory,
-                                                               lambda x: print(x, end='', flush=True))
-                            Color.end_color()
-
-                        with Timer("Command Execution Loop"):
-                            # Execute commands
-                            Color.colorize("blue", bold=True, text="\nExecuting Commands:")
-                            results, error, is_complete = coda.e_execute_commands(commands, working_directory)
-
-                            # save results to chat history including any errors
-                            prompt_manager.add_message("user", make_output_prompt(results, error))
-
-                            if error:
-                                Color.colorize("red", bold=True, text=f"\nExecution stopped due to error")
-                                continue
-
-                            if is_complete:
-                                Color.colorize("green", bold=True, text="\nTask completed successfully!")
-                                follow_up = Color.colorize_input("none", bold=True, multiline=True,
-                                                                text="Enter a follow-up task description (or press Enter to exit): ").strip()
-                                if not follow_up:
-                                    print("Exiting CODA.")
-                                    break
-                                else:
-                                    task_description = follow_up
-
-                    except Exception as e:
-                        error_msg = f"Unexpected error during execution: {str(e)}"
-                        Color.colorize("red", bold=True, text=f"\n✗ {error_msg}")
-                        # Add the error to the chat history
-                        prompt_manager.add_message("user", make_output_prompt([], error_msg))
-                        continue
+                    res = run_standard_agent(coda, task_description, working_directory)
+                    task_description = run_optimization_agent(coda, task_description, working_directory)
+                    should_continue = Color.colorize_input("none", bold=True, text="Continue? (y/n)").strip()
+                    if should_continue.lower() != 'y':
+                        break
 
         except KeyboardInterrupt:
             Color.colorize("yellow", bold=True, text="\nReceived keyboard interrupt, shutting down...")

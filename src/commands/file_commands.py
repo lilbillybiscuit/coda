@@ -243,10 +243,14 @@ class ReadFileCommand(Command):
             selected_lines = lines[line_start:line_end]
             file_continues = line_end < len(lines)
 
+            output = ''.join(selected_lines)
+            if len(output) > 2000:
+                output = output[:2000] + '... (output truncated)'
+
             result = CommandResult.success(
                 "read",
                 path=str(target_path),
-                stdout=''.join(selected_lines),
+                stdout=output,
                 other={
                     "line_start": line_start,
                     "line_end": line_end,
