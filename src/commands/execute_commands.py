@@ -62,7 +62,7 @@ class ExecuteCommand(Command):
         "sort", "uniq", "diff", "tar", "gzip", "gunzip"
     }
 
-    TIMEOUT_SECONDS = 60
+    TIMEOUT_SECONDS = 30
 
     def is_command_safe(self, cmd_str: str) -> bool:
         """Check if the shell command is in the whitelist"""
@@ -163,7 +163,7 @@ class ExecuteCommand(Command):
                         stderr=f"Command execution exceeded timeout of {self.TIMEOUT_SECONDS} seconds",
                         other={
                             "command": cmd_str,
-                            "execution_time": f"{format_time(elapsed_time)}",
+                            # "execution_time": f"{format_time(elapsed_time)} seconds",
                             "timeout": self.TIMEOUT_SECONDS
                         }
                     )
@@ -171,6 +171,11 @@ class ExecuteCommand(Command):
                     success = exit_code == 0
                     status = "executed" if success else "failed"
                     message = f"Command executed with exit code {exit_code}"
+
+                    if len(stdout) > 5000:
+                        stdout = stdout[:5000] + "\n... (truncated)"
+                    if len(stderr) > 5000:
+                        stderr = stderr[:5000] + "\n... (truncated)"
 
                     command_result = CommandResult(
                         path=cmd_str,
@@ -182,7 +187,7 @@ class ExecuteCommand(Command):
                         other={
                             "exit_code": exit_code,
                             "command": cmd_str,
-                            "execution_time": f"{format_time(elapsed_time)}"
+                            # "execution_time": f"{format_time(elapsed_time)}"
                         }
                     )
             except Exception as e:
@@ -224,7 +229,7 @@ class ExecuteCommand(Command):
                     stderr=f"Command execution exceeded timeout of {self.TIMEOUT_SECONDS} seconds",
                     other={
                         "command": cmd_str,
-                        "execution_time": f"{format_time(elapsed_time)}",
+                        # "execution_time": f"{format_time(elapsed_time)}",
                         "timeout": self.TIMEOUT_SECONDS
                     }
                 )
@@ -244,3 +249,146 @@ class ExecuteCommand(Command):
             spin_thread.join(timeout=0.1)
             # Ensure spinner line is completely cleared
             print("\r" + " " * 100 + "\r", end="", flush=True)
+
+
+@command("submit", color="magenta",
+         required=["source_code"],
+         properties={
+             "source_code": {
+                 "type": "string",
+                 "description": "Rust source code to execute"
+             },
+         })
+class SubmitRustCommand(Command):
+    """
+    Submit and test Rust code by compiling and executing it.
+    Will also measure execution time and compare output with expected output.
+    Example:
+    {
+        "action": "submit",
+        "source_code": "fn main() { println!(\"Hello World\"); }",
+    }
+    """
+
+    def execute(self, context: CommandContext) -> CommandResult:
+        if not context.docker_env:
+            return CommandResult.error(
+                "Docker environment required",
+                path="submit"
+            )
+
+        source_code = self.data["source_code"]
+        save_path = "src/main.rs"
+        correct_output_path = "data/correct_output.txt"
+
+        try:
+            # Save source code to file
+            context.docker_env.copy_to_container(source_code, save_path)
+
+            # Compile with optimizations
+            stdout, stderr, exit_code = context.docker_env.execute(
+                f"rustc -C opt-level=3 {save_path}"
+            )
+
+            if exit_code != 0:
+                return CommandResult.error(
+                    f"Compilation failed: {stderr}",
+                    path=save_path,
+                    stdout=stdout,
+                    stderr=stderr
+                )
+
+            # Execute with time measurement
+            stdout, stderr, exit_code = context.docker_env.execute(
+                "/usr/bin/time -f '%e' ./main"
+            )
+
+            if exit_code != 0:
+                return CommandResult.error(
+                    f"Execution failed: {stderr}",
+                    path=save_path,
+                    stdout=stdout,
+                    stderr=stderr
+                )
+
+            # Extract execution time from stderr (last line)
+            execution_time = float(stderr.strip().split('\n')[-1])
+
+            # Get the workspace path for accessing files
+            workspace_path = context.docker_env.get_workspace_path()
+
+            # Copy output.txt from container to local workspace
+            context.docker_env.copy_from_container(
+                "/workspace/output.txt",
+                str(workspace_path / "output.txt")
+            )
+
+            # Compare output with correct output locally
+            try:
+                with open(workspace_path / "output.txt") as f1, open(correct_output_path) as f2:
+                    output_content = f1.readlines()
+                    correct_content = f2.readlines()
+
+                # Compare line by line, converting strings to numbers
+                is_correct = True
+                differences = []
+
+                if len(output_content) != len(correct_content):
+                    is_correct = False
+                    differences.append(
+                        f"Line count mismatch: got {len(output_content)}, expected {len(correct_content)}")
+                else:
+                    for i, (out_line, cor_line) in enumerate(zip(output_content, correct_content)):
+                        # Split lines into numbers and compare
+                        out_nums = [float(x) for x in out_line.strip().split()]
+                        cor_nums = [float(x) for x in cor_line.strip().split()]
+
+                        if len(out_nums) != len(cor_nums):
+                            is_correct = False
+                            differences.append(f"Line {i + 1}: Number count mismatch")
+                            continue
+
+                        for j, (out_num, cor_num) in enumerate(zip(out_nums, cor_nums)):
+                            if abs(out_num - cor_num) > 1e-6:  # Allow small floating-point differences
+                                is_correct = False
+                                differences.append(f"Line {i + 1}, Number {j + 1}: Got {out_num}, expected {cor_num}")
+
+                if is_correct:
+                    result_msg = f"✓ Output matches expected result (Time: {execution_time:.3f}s)"
+                else:
+                    result_msg = f"✗ Output differs from expected result (Time: {execution_time:.3f}s)\nDifferences:\n"
+                    result_msg += "\n".join(differences[:10])  # Show first 10 differences
+                    if len(differences) > 10:
+                        result_msg += f"\n... and {len(differences) - 10} more differences"
+
+                return CommandResult(
+                    path=save_path,
+                    status="submitted",
+                    success=is_correct,
+                    message=result_msg,
+                    stdout=stdout,
+                    stderr=stderr,
+                    other={
+                        # "execution_time": execution_time,
+                        "is_correct": is_correct,
+                        "source_code": source_code,
+                        "differences_count": len(differences)
+                    }
+                )
+
+            except FileNotFoundError as e:
+                return CommandResult.error(
+                    f"Output file comparison failed: {e}",
+                    path=save_path
+                )
+            except ValueError as e:
+                return CommandResult.error(
+                    f"Number parsing failed: {e}",
+                    path=save_path
+                )
+
+        except Exception as e:
+            return CommandResult.error(
+                str(e),
+                path=save_path
+            )
