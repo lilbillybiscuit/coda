@@ -42,6 +42,7 @@ class CODA:
         self.prompt_manager = prompt_manager
         self.json_executor = json_executor
         self.prompt_manager_snapshot = None
+        self.previous_suggestions = []
 
     def call_openai_api(self, callback: Optional[callable] = None):
         messages = self.prompt_manager.get_messages()
@@ -78,28 +79,39 @@ class CODA:
     def c_generate_commands(self, task_description: str, working_directory: str, callback: Optional[callable] = None):
         """Generate commands based on task description."""
         self.prompt_manager.set_system_message(
-            "You are an AI programmer that writes highly optimized to accomplish tasks in a Linux environment."
-            "Use the 'complete' command when you determine the task is finished. Do NOT write complete until you have seen 'PROGRAM RESULT' in the chat history."
-            "Return only a JSON array of commands without explanations or markdown. Each command should be atomic and focused. Each command should include a 'summary' field that briefly describes what the command does. "
-            "For execute commands, you can assume that you are running these commands in a shell -- no need to write bash as the main command"
-            f"Available commands and their schemas:\n{json.dumps(self.json_executor.get_command_docs(), indent=2)}"
-            "If there has been multiple attempts of the same command without success, or if you are completely stuck, you can use the giveup command"
+            f"""You are an AI programmer tasked with generating a sequence of Linux commands to accomplish a specific programming task.
+
+**Objective:** Generate a JSON array of commands to fulfill the user's task description.
+
+**Constraints:**
+
+*   Output only a valid JSON array (no extra text or markdown).
+*   Each command in the array must be atomic and focused.
+*   Each command must include an "action" and a "summary" field.
+*   Refer to the available command schemas:
+    ```json
+    {json.dumps(self.json_executor.get_command_docs(), indent=2)}
+    ```
+*   Use the "complete" command only when the task is fully solved and you have seen "PROGRAM RESULT" in the chat history.
+*   Prioritize code correctness and efficiency. Consider compiler optimization flags like `-C opt-level=3`.
+*   If you encounter an error, use debugging techniques to identify the cause.
+*   If a command fails repeatedly or you are stuck, use the "giveup" command.
+*   Do not re-run the same command if it has already been executed without changes to its parameters.
+*   If dependencies or tools are missing, install them using appropriate commands."""
         )
 
         prompt = f"""
-        Hint: Try not to re-run the same command if it has already been executed
-        Write and compile code using the fastest way possible, as long as it is correct. This includes using compiler optimization flags (-C opt-level=3), etc.
-        
-        If there are missing items in the environment, please install them as a separate command sequence before moving on.
-        After you've solved the task, write code to check your work (for example with python libraries) and time it.
-        If your output is incorrect, use debugging techniques to figure out why, and go from there.
-        
-        Generate commands for the following task:
-        {task_description}
+**Task Description:**
 
-        Working directory: {working_directory}
-        You may assume that commands with output results have already been executed in the environment.
-        
+{task_description}
+
+**Working Directory:**
+
+{working_directory}
+
+**Execution Context:**
+
+Assume commands with output results in the chat history have already been executed.
         """
 
         self.prompt_manager.add_message("user", prompt)
@@ -119,27 +131,57 @@ class CODA:
             raise ValueError("Failed to parse commands as JSON")
     def c_generate_optimization_task(self, task_description: str, working_directory: str, callback: Optional[callable] = None):
         """Generate commands based on task description."""
-        self.prompt_manager.set_system_message(
-            "You are an AI assistant that suggests optimization strategies for a given task. You are NOT writing code, but merely suggestion optimization strategies as a result of your observations"
-            "Return only a JSON array of commands without explanations or markdown. Each command should be atomic and focused. Each command should include a 'summary' field that briefly describes what the command does. "
-            "For execute commands, you can assume that you are running these commands in a shell -- no need to write bash as the main command"
-            f"Available commands and their schemas:\n{json.dumps(self.json_executor.get_command_docs(), indent=2)}"
-            "If there has been multiple attempts of the same command without success, or if you are completely stuck, you can use the giveup command"
-            "Use the 'complete' command when you have finished coming up with your suggestion. Let the completion message be your suggestion. DO NOT write complete until you are sure you have all the details you need to make a suggestion; when it is called it should only be a single command."
-            "Hint: Pay attention to the following components: cache sizes, CPU architecture details, SIMD instructions, memory access patterns, and parallelism, algorithmic optimizations, among others."
-            "Hint: Use commands to get the information you need about the execution environment, the task itself, details about the current implementation, etc."
+        self.prompt_manager.set_system_message(f"""
+You are an AI assistant specializing in code optimization. Your goal is to suggest strategies to improve the performance of code generated by the programming agent.
+
+**Objective:** Analyze the provided task description, chat history (including code and execution results), and working directory contents to generate a JSON array of commands. These commands will be used to gather information about the code and its execution environment. Use this information to provide a single optimization suggestion to the programmer.
+**Constraints:**
+
+*   Output only a valid JSON array (no extra text or markdown).
+*   Each command must include an "action" and a "summary" field.
+*   Refer to the available command schemas:
+    ```json
+    {json.dumps(self.json_executor.get_command_docs(), indent=2)}
+    ```
+*   Focus on providing ONE concrete optimization suggestion at a time.
+*   Your optimization suggestion should be concise and start with phrases like "Alter your code so that..." or "Change the code to...".
+*   Consider factors like:
+    *   Cache sizes (use `lscpu` or similar commands)
+    *   CPU architecture details
+    *   SIMD instructions
+    *   Memory access patterns
+    *   Parallelism
+    *   Algorithmic improvements
+    *   Input data types (e.g., integer vs. floating-point, 8-bit, 16-bit, etc.)
+*   Try not to use suggestions that have been previously provided, and make sure they are roughly incremental.
+*   Use commands to gather necessary information about the environment, task, and current implementation.
+*   Once you have formulated a suggestion and are ready to present it, use the "complete" command. The content of the "complete" command's message will be your optimization suggestion.
+*   DO NOT use the "complete" command until you have all necessary details. It should be the final command in your sequence.
+                                               
+**Examples**
+* Using a Python program to discover facts about the data and the environment.
+"""
         )
 
         prompt = f"""
-        Use the 'complete' command when you have finished coming up with your suggestion. Let the completion message be your suggestion. DO NOT write complete until you are sure you have all the details you need to make a suggestion; when it is called it should only be a single command.
-        After reading the previous work, please suggest to the programmer optimization techniques that will make the code run faster. You will likely need to make low-level optimization suggestions specific to the hardware.
-        The optimization techniques should be clear and concise, and should start with "Alter your code so that..." or "Change the code to...".
-        Commands like lscpu to determine platform details, etc. would be helpful.
-        Suggest one optimization at a time, and hand it off to the programmer to implement.
+First analyze the code to determine correctness, and benchmark time to run. Then, return a completion with optimizations suggestions on to improve the performance of the code.
+**Original Prompt**
+{current_prompt}
 
-        Working directory: {working_directory}
-        You may assume that commands with output results have already been executed in the environment.
-        Let the programmer do the main programming, you are only suggesting optimizations based on what you see.
+**Task Description:**
+
+{task_description}
+
+**Working Directory:**
+
+{working_directory}
+
+**Previous Suggestions (Do not reuse)**
+
+{self.get_previous_suggestions()}
+**Execution Context:**
+
+Assume commands with output results in the chat history have already been executed. You are providing suggestions to the programmer; you are not writing the code yourself.
         """
 
         self.prompt_manager.add_message("user", prompt)
@@ -249,6 +291,14 @@ class CODA:
         else:
             Color.colorize("yellow", bold=True, text="No prompt manager snapshot to restore")
             raise ValueError("No prompt manager snapshot to restore")
+    def save_suggestion(self, suggestion: str):
+        """Save the suggestion to the list of previous suggestions."""
+        self.previous_suggestions.append(suggestion)
+
+    def get_previous_suggestions(self):
+        """Get the list of previous suggestions."""
+        return self.previous_suggestions
+
 def run_standard_agent(coda: CODA, task_description,working_directory: str) -> bool:
     prompt_manager = coda.prompt_manager
     Color.colorize("none", bold=True, text="\nStarting Coding Agent...")
@@ -315,6 +365,9 @@ def run_optimization_agent(coda: CODA, task_description,working_directory: str) 
                     completion_message = next((r.message for r in results if r.status == "completed"), None)
                     coda.restore_prompt_manager()
                     if completion_message:
+                        Color.colorize("yellow", bold=True, text="\nOptimization suggestion:")
+                        Color.colorize("yellow", bold=False, text=completion_message)
+                        coda.save_suggestion(completion_message)
                         return completion_message
                     else:
                         Color.colorize("red", bold=True, text="\nNo completion message found")

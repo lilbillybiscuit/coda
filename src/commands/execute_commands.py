@@ -99,7 +99,7 @@ class ExecuteCommand(Command):
         cmd = [command] + args
         cmd_str = " ".join(cmd)
 
-        timeout_cmd = f"timeout {self.TIMEOUT_SECONDS}s {cmd_str}"
+        timeout_cmd = f"timeout {self.TIMEOUT_SECONDS}s /bin/bash -c \"{cmd_str}\""
 
         if context.dry_run:
             return CommandResult(

@@ -217,6 +217,9 @@ class ReadFileCommand(Command):
         # Get workspace path from Docker environment
         workspace_path = context.docker_env.get_workspace_path()
         target_path = self.data["target"]
+        # if target path contains "/workspace", remove it
+        if "/workspace" in target_path:
+            target_path = target_path.split("workspace/")[1]
         local_path = workspace_path / target_path
 
         line_start = self.data.get("line_start", 0)
